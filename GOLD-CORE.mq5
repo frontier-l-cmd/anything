@@ -126,7 +126,7 @@ input double MinTotalProfitJPY  = 0;      // 最低合計利益(円)
 
 //=== 損切り設定 ===
 input group "===== 含み損損切り ====="
-input bool   UseMaxLoss   = true;         // 含み損損切り機能(GOLDもデフォルトON)
+input bool   UseMaxLoss   = false;        // 含み損損切り機能(GOLDはデフォルトOFF)
 input double MaxLoss_JPY  = 80000;        // 損切りライン(円) ※BTC:100000 → GOLD:80000
 
 //=== 曜日フィルター ===
