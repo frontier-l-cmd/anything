@@ -113,6 +113,27 @@
     font-size: 11px;
     letter-spacing: 0.06em;
   }
+  .icon-btn {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 46px;
+    height: 46px;
+    border-radius: 12px;
+    border: 1px solid var(--panel-line);
+    background: rgba(12, 18, 26, 0.6);
+    color: var(--ink);
+    font-size: 15px;
+    letter-spacing: 0.05em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 5;
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+  }
+  .icon-btn:active { transform: translateY(1px); }
 </style>
 </head>
 <body>
@@ -134,6 +155,19 @@
     <div class="row">
       <button class="btn btn-primary" id="btn-retry">もう一度</button>
       <button class="btn" id="btn-title">タイトルへ</button>
+    </div>
+  </div>
+
+  <!-- Pause button (visible only while playing) -->
+  <button class="icon-btn hidden" id="btn-pause" aria-label="一時停止">II</button>
+
+  <!-- Pause overlay -->
+  <div class="overlay hidden" id="overlay-pause">
+    <h2 class="result-title">一時停止</h2>
+    <p class="subtle">P / Esc でも再開できます</p>
+    <div class="row">
+      <button class="btn btn-primary" id="btn-resume">再開</button>
+      <button class="btn" id="btn-pause-title">タイトルへ</button>
     </div>
   </div>
 
@@ -457,18 +491,26 @@
       if (this.phase === "control" && this.piece) {
         const interval = this.softDrop ? SOFT_DROP_MS : GRAVITY_MS;
         this.fallTimer += dt;
-        // Smooth visual interpolation between rows.
-        this.piece.offsetY = Math.min(1, this.fallTimer / interval);
+        // Step the piece down one whole row per elapsed interval first.
         while (this.fallTimer >= interval) {
           this.fallTimer -= interval;
           const p = this.piece;
           if (this.fits(p.row + 1, p.col, p.orient)) {
             p.row += 1;
           } else {
+            this.fallTimer = 0;
             p.offsetY = 0;
             this.lockPiece();
             return;
           }
+        }
+        // Interpolate only toward a cell we can actually enter, so the piece
+        // never visually overshoots/penetrates the floor before locking.
+        const p = this.piece;
+        if (this.fits(p.row + 1, p.col, p.orient)) {
+          p.offsetY = this.fallTimer / interval;
+        } else {
+          p.offsetY = 0; // resting on the floor: hold steady, no dip
         }
       } else if (this.phase === "clearing") {
         this.timer -= dt;
@@ -635,16 +677,32 @@
   const SCREEN = { TITLE: "title", PLAYING: "playing", RESULT: "result" };
   let screen = SCREEN.TITLE;
   let board = null;
+  let paused = false;
 
   const elTitle = document.getElementById("overlay-title");
   const elResult = document.getElementById("overlay-result");
   const elResultTitle = document.getElementById("result-title");
   const elResultScore = document.getElementById("result-score");
+  const elPause = document.getElementById("overlay-pause");
+  const elBtnPause = document.getElementById("btn-pause");
 
   function showScreen(s) {
     screen = s;
+    paused = false;
     elTitle.classList.toggle("hidden", s !== SCREEN.TITLE);
     elResult.classList.toggle("hidden", s !== SCREEN.RESULT);
+    elPause.classList.add("hidden");
+    elBtnPause.classList.toggle("hidden", s !== SCREEN.PLAYING);
+  }
+
+  function setPaused(on) {
+    if (screen !== SCREEN.PLAYING) return;
+    if (board && board.gameOver) return;
+    paused = on;
+    if (board) board.setSoftDrop(false); // avoid a stuck soft-drop on resume
+    keyHeld.down = false;
+    elPause.classList.toggle("hidden", !on);
+    elBtnPause.classList.toggle("hidden", on); // hide small button while overlay shows
   }
 
   function startGame() {
@@ -664,11 +722,25 @@
   document.getElementById("btn-title").addEventListener("click", function () {
     showScreen(SCREEN.TITLE);
   });
+  elBtnPause.addEventListener("click", function () { setPaused(true); });
+  document.getElementById("btn-resume").addEventListener("click", function () {
+    setPaused(false);
+  });
+  document.getElementById("btn-pause-title").addEventListener("click", function () {
+    showScreen(SCREEN.TITLE);
+  });
 
   // ---- Keyboard input --------------------------------------------------
   const keyHeld = {};
   window.addEventListener("keydown", function (e) {
     if (screen !== SCREEN.PLAYING || !board) return;
+    // Pause toggle works whether or not we're currently paused.
+    if (e.key === "p" || e.key === "P" || e.key === "Escape") {
+      setPaused(!paused);
+      e.preventDefault();
+      return;
+    }
+    if (paused) return; // ignore gameplay keys while paused
     let handled = true;
     switch (e.key) {
       case "ArrowLeft": board.move(-1); break;
@@ -809,7 +881,7 @@
     if (b.piece && b.phase === "control") {
       const p = b.piece;
       const o = childOffset(p.orient);
-      const interp = (p.softDropVisual ? 0 : p.offsetY) || p.offsetY;
+      const interp = p.offsetY;
       const py = (p.row - HIDDEN_ROWS + interp) * CELL;
       // pivot
       drawPieceCell(ox, oy, p.col, py, p.a);
@@ -919,14 +991,15 @@
 
     updateAmbient(dt);
 
-    if (screen === SCREEN.PLAYING && board) {
+    if (screen === SCREEN.PLAYING && board && !paused) {
       board.update(dt);
       if (board.gameOver && !board._ended) {
         board._ended = true;
+        elBtnPause.classList.add("hidden");
         // brief pause so the final state is visible before the result screen
         setTimeout(endGame, 700);
       }
-    } else if (board) {
+    } else if (board && screen === SCREEN.RESULT) {
       // Keep particles alive on the result screen.
       board.updateParticles(dt);
     }
