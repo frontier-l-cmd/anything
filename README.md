@@ -1,3 +1,47 @@
+# ZeroDrop
+
+落ちもの対戦パズルゲーム（独自オリジナル）。外部ライブラリ不使用・Canvas 2D + Vanilla JS で、
+すべてを単一の `index.html` にインライン収録した**静的サイト**です。WordPress 埋め込みや
+GitHub Pages 公開を想定しています。
+
+> 現在の実装範囲: **Phase 1（コアエンジン・1人用・妨害なし）**
+
+## ローカルで動かす
+
+`index.html` をブラウザで直接開くだけで動作します（ビルド不要・サーバー不要）。
+
+```bash
+# 任意: 簡易サーバーで開く場合
+python3 -m http.server 8000
+# → http://localhost:8000/index.html
+```
+
+## GitHub Pages で公開する手順
+
+このリポジトリは静的サイトとしてそのまま公開できます。`index.html` がリポジトリの
+**ルート**にあり、CSS/JS/アセットはすべてインライン（外部参照ゼロ）なので、サブパス公開でも
+リンクが壊れません。Jekyll 処理を無効化する `.nojekyll` も同梱済みです。
+
+1. 公開したい内容（`index.html` / `.nojekyll`）を **`main` ブランチのルート**に置く
+   （このゲームは作業ブランチで開発中のため、公開時は `main` へマージしてください）。
+2. GitHub リポジトリの **Settings → Pages** を開く。
+3. **Build and deployment → Source** を **「Deploy from a branch」** にする。
+4. **Branch** を **`main`**、フォルダを **`/ (root)`** に設定して **Save**。
+5. 数十秒〜数分待つと公開されます。
+
+### スマホでのテストURL
+
+公開後、以下のURLにスマホのブラウザでアクセスするとそのままプレイできます。
+
+```text
+https://singasong0224-lgtm.github.io/anything/
+```
+
+> 反映には少し時間がかかります。表示が更新されない場合は、ブラウザのキャッシュ削除や
+> URL 末尾に `?v=2` のようなクエリを付けてアクセスしてください。
+
+---
+
 # Ledger CLI
 
 標準ライブラリのみで動く、家計簿のCSV風テキストを月次集計する最小CLIです。
