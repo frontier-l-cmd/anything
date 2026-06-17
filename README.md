@@ -4,9 +4,10 @@
 すべてを単一の `index.html` にインライン収録した**静的サイト**です。WordPress 埋め込みや
 GitHub Pages 公開を想定しています。
 
-> 現在の実装範囲: **Phase 3（妨害モード：ゲージ＆自動発動・5種デバフ）**
-> ＝ Phase 2（対CPU・2盤面・おじゃま）に、連鎖で溜まるゲージと満タン自動発動の妨害5種
-> （アンチグラビティ／左右反転／ブラックアウト／スピードアップ／シャッフル）＋警告・テロップを追加。
+> 現在の実装範囲: **Phase 4（仕上げ・全機能入り）**
+> ＝ コアエンジン＋対CPU（EASY/NORMAL/HARD）＋おじゃま＋妨害5種に加えて、
+> Web Audio API による自作効果音・アンビエント（著作権クリーン）、ミュート切替（保存）、
+> 連鎖ポップアップ演出、スマホUI調整、WordPress 埋め込み手順を追加。
 
 ## ローカルで動かす
 
@@ -30,6 +31,26 @@ python3 -m http.server 8000
 3. **Build and deployment → Source** を **「Deploy from a branch」** にする。
 4. **Branch** を **`main`**、フォルダを **`/ (root)`** に設定して **Save**。
 5. 数十秒〜数分待つと公開されます。
+
+## WordPress への埋め込み
+
+GitHub Pages で公開済みのURLを **iframe** で読み込むのが最も簡単・安全です（更新もPages側を直すだけで反映）。
+
+WordPress 編集画面で **「カスタムHTML」ブロック**を追加し、以下を貼り付けてください。
+
+```html
+<iframe
+  src="https://singasong0224-lgtm.github.io/anything/"
+  title="ZeroDrop"
+  loading="lazy"
+  style="width:100%; max-width:560px; height:680px; border:0; display:block; margin:0 auto; border-radius:14px;"
+  allow="autoplay">
+</iframe>
+```
+
+- スマホでは縦が足りない場合があるので `height` は実機を見て調整してください（コントローラー込みで `680〜760px` 目安）。
+- 音は端末・ブラウザのポリシー上、最初のタップ／クリック後に有効化されます（iframe でも同様）。`allow="autoplay"` を付けています。
+- 直接埋め込み（index.html の中身をHTMLブロックに貼る）も可能ですが、更新が手間なので **iframe を推奨**します。
 
 ### スマホでのテストURL
 

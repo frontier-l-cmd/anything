@@ -144,6 +144,7 @@
     backdrop-filter: blur(4px);
   }
   .icon-btn:active { transform: translateY(1px); }
+  .icon-btn-left { left: 14px; right: auto; font-size: 18px; }
 
   /* On-screen controller (touch only). Left: move row. Center: pause. Right: rotate / drop stack. */
   #touch-controls {
@@ -260,6 +261,9 @@
   <!-- Pause button (visible only while playing, desktop) -->
   <button class="icon-btn hidden" id="btn-pause" aria-label="一時停止">II</button>
 
+  <!-- Mute toggle (always visible) -->
+  <button class="icon-btn icon-btn-left" id="btn-mute" aria-label="音のオン/オフ">🔊</button>
+
   <!-- Pause overlay -->
   <div class="overlay hidden" id="overlay-pause">
     <h2 class="result-title">一時停止</h2>
@@ -270,7 +274,7 @@
     </div>
   </div>
 
-  <div class="footer-note">Phase 3 — disruptions</div>
+  <div class="footer-note">Phase 4 — polish</div>
 </div>
 
 <script>
@@ -452,6 +456,7 @@
     constructor() {
       this.onSend = null;   // function(n): route garbage to the opponent
       this.onDebuff = null; // function(): the gauge filled -> hit the opponent
+      this.onEvent = null;  // function(type, data): UI/audio hook (no-op for logic)
       this.reset();
     }
 
@@ -472,6 +477,7 @@
       this.warnT = 0;             // warning-flash timer
       this.fakeNext = this.makePair(); // bogus NEXT shown under シャッフル
       this.fakeTimer = 0;
+      this.chainPopup = null;     // { text, t } "N 連鎖!" popup
       this.particles = [];
       this.clearing = [];
       this.phase = "control";
@@ -497,6 +503,7 @@
         this.gameOver = true;
         this.phase = "over";
         this.piece = null;
+        this.emit("over");
       } else {
         this.phase = "control";
         this.fallTimer = 0;
@@ -563,6 +570,7 @@
       if (cells[1].row >= 0 && cells[1].row < ROWS) this.grid[cells[1].row][cells[1].col] = p.b;
       this.piece = null;
       this.chainScore = 0; // start of a fresh resolution
+      this.emit("lock");
       this.applyGravity();
       this.beginResolve();
     }
@@ -588,6 +596,8 @@
       const stepScore = Math.round(count * 10 * bonus);
       this.score += stepScore;
       this.chainScore += stepScore;
+      this.emit("clear", { chain: this.chain, count: count });
+      if (this.chain >= 2) this.chainPopup = { text: this.chain + " 連鎖!", t: 1000 };
 
       this.phase = "clearing";
       this.timer = CLEAR_FLASH_MS;
@@ -653,6 +663,8 @@
       this.timer = SETTLE_PAUSE_MS;
     }
 
+    emit(type, data) { if (this.onEvent) this.onEvent(type, data); }
+
     addPendingGarbage(n) { this.pendingGarbage += n; }
 
     // A debuff lands on this board: start its timer + show warning/telop.
@@ -661,6 +673,7 @@
       this.telop = { text: def.name, t: TELOP_MS };
       this.warnT = WARN_MS;
       if (def.key === "shuffle") this.fakeTimer = 0;
+      this.emit("debuff", def);
     }
 
     updateDebuffs(dt) {
@@ -668,6 +681,7 @@
         if (this.debuffs[k] > 0) this.debuffs[k] = Math.max(0, this.debuffs[k] - dt);
       }
       if (this.telop) { this.telop.t -= dt; if (this.telop.t <= 0) this.telop = null; }
+      if (this.chainPopup) { this.chainPopup.t -= dt; if (this.chainPopup.t <= 0) this.chainPopup = null; }
       if (this.warnT > 0) this.warnT = Math.max(0, this.warnT - dt);
       if (this.debuffs.shuffle > 0) {
         this.fakeTimer -= dt;
@@ -697,6 +711,7 @@
         while (add > 0 && dr >= 0) { this.grid[dr][c] = OJAMA; dr--; add--; }
       }
       this.applyGravity();
+      if (n > 0) this.emit("garbage", { n: n });
     }
 
     spawnShatter(col, row, colorId) {
@@ -939,6 +954,82 @@
   }
 
   // =====================================================================
+  // Audio — all synthesized with the Web Audio API (no files, copyright
+  // clean). Soft, gentle tones per the "静かで集中できる" brief.
+  // =====================================================================
+  const Sound = (function () {
+    let ctx = null, master = null, muted = false, ambientOn = false;
+
+    function init() {
+      if (ctx) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try { ctx = new AC(); } catch (e) { ctx = null; return; }
+      master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.9;
+      master.connect(ctx.destination);
+    }
+    function resume() { if (ctx && ctx.state === "suspended") ctx.resume(); }
+    function setMuted(m) { muted = m; if (master) master.gain.value = m ? 0 : 0.9; }
+    function isMuted() { return muted; }
+
+    // One gently-enveloped voice (ramped gain avoids clicks).
+    function tone(freq, t0, dur, type, vol, glideTo) {
+      if (!ctx) return;
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = type || "sine";
+      o.frequency.setValueAtTime(freq, t0);
+      if (glideTo) o.frequency.exponentialRampToValueAtTime(glideTo, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(vol, t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g); g.connect(master);
+      o.start(t0); o.stop(t0 + dur + 0.03);
+    }
+
+    // C major pentatonic — pleasant, never dissonant as chains climb.
+    const PENTA = [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.5];
+
+    const sfx = {
+      move:   function () { if (ctx) tone(220, ctx.currentTime, 0.05, "triangle", 0.05); },
+      rotate: function () { if (ctx) tone(330, ctx.currentTime, 0.06, "triangle", 0.06, 440); },
+      drop:   function () { if (ctx) tone(160, ctx.currentTime, 0.12, "sine", 0.10, 90); },
+      clear:  function (chain) {
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        const idx = Math.min(Math.max((chain || 1) - 1, 0), PENTA.length - 1);
+        tone(PENTA[idx], t, 0.30, "sine", 0.16);
+        tone(PENTA[idx] * 2, t, 0.22, "triangle", 0.045);
+      },
+      debuff: function () {
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        tone(440, t, 0.16, "sawtooth", 0.045, 320);
+        tone(210, t + 0.05, 0.32, "sine", 0.07, 170);
+      },
+      garbage: function () { if (ctx) tone(120, ctx.currentTime, 0.18, "sine", 0.10, 72); },
+      win:  function () { if (!ctx) return; const t = ctx.currentTime; [0,1,2,4].forEach(function (k,i){ tone(PENTA[k], t + i*0.12, 0.4, "sine", 0.14); }); },
+      lose: function () { if (!ctx) return; const t = ctx.currentTime; [4,2,1,0].forEach(function (k,i){ tone(PENTA[k]/2, t + i*0.14, 0.45, "sine", 0.12); }); },
+    };
+
+    // Very soft drone pad (two low sines through a lowpass, slow detune).
+    function startAmbient() {
+      if (!ctx || ambientOn) return;
+      ambientOn = true;
+      const g = ctx.createGain(); g.gain.value = 0.05; g.connect(master);
+      const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 600; lp.connect(g);
+      [130.81, 196.00].forEach(function (f) {
+        const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = f;
+        const og = ctx.createGain(); og.gain.value = 0.5; o.connect(og); og.connect(lp); o.start();
+        const lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
+        const lg = ctx.createGain(); lg.gain.value = 2.5; lfo.connect(lg); lg.connect(o.detune); lfo.start();
+      });
+    }
+
+    return { init: init, resume: resume, setMuted: setMuted, isMuted: isMuted, sfx: sfx, startAmbient: startAmbient };
+  })();
+
+  // =====================================================================
   // Game shell — canvas sizing, loop, input, screen state.
   // =====================================================================
   const canvas = document.getElementById("zd-canvas");
@@ -1030,8 +1121,20 @@
     elTouch.classList.toggle("hidden", on || !(isTouch && screen === SCREEN.PLAYING));
   }
 
+  function makeAudioHandler(isPlayer) {
+    return function (type, data) {
+      switch (type) {
+        case "clear": Sound.sfx.clear(data && data.chain); break;
+        case "debuff": Sound.sfx.debuff(); break;
+        case "garbage": Sound.sfx.garbage(); break;
+        case "lock": if (isPlayer) Sound.sfx.drop(); break;
+      }
+    };
+  }
+
   function startGame(diff) {
     difficulty = diff || difficulty || "NORMAL";
+    Sound.init(); Sound.resume(); Sound.startAmbient();
     board = new Board();
     cpuBoard = new Board();
     board.onSend = function (n) { cpuBoard.addPendingGarbage(n); };
@@ -1039,6 +1142,8 @@
     var pick = function () { return DEBUFFS[Math.floor(Math.random() * DEBUFFS.length)]; };
     board.onDebuff = function () { cpuBoard.applyDebuff(pick()); };
     cpuBoard.onDebuff = function () { board.applyDebuff(pick()); };
+    board.onEvent = makeAudioHandler(true);
+    cpuBoard.onEvent = makeAudioHandler(false);
     cpuCtrl = makeCpu(cpuBoard, difficulty);
     matchEnded = false;
     showScreen(SCREEN.PLAYING);
@@ -1050,6 +1155,8 @@
     elResultTitle.style.color = result === "WIN" ? "#7fe0d6" : "#f58ad6";
     elResultScore.textContent =
       "あなた " + board.score + " ・ CPU " + cpuBoard.score + "（" + difficulty + "）";
+    Sound.resume();
+    if (result === "WIN") Sound.sfx.win(); else Sound.sfx.lose();
   }
 
   // Title difficulty buttons start the match.
@@ -1062,6 +1169,31 @@
   document.getElementById("btn-resume").addEventListener("click", function () { setPaused(false); });
   document.getElementById("btn-pause-title").addEventListener("click", function () { showScreen(SCREEN.TITLE); });
 
+  // Mute toggle (persisted).
+  const elMute = document.getElementById("btn-mute");
+  function refreshMute() { elMute.textContent = Sound.isMuted() ? "🔇" : "🔊"; }
+  elMute.addEventListener("click", function () {
+    Sound.init(); Sound.resume();
+    const m = !Sound.isMuted();
+    Sound.setMuted(m);
+    try { localStorage.setItem("zd_muted", m ? "1" : "0"); } catch (_) {}
+    refreshMute();
+  });
+
+  // ---- Player input wrappers (play SFX only on a real change) ----
+  function pMove(dir) {
+    if (!board || !board.piece) return;
+    const c = board.piece.col; board.move(dir);
+    if (board.piece && board.piece.col !== c) Sound.sfx.move();
+  }
+  function pRotate(dir) {
+    if (!board || !board.piece) return;
+    const o = board.piece.orient; board.rotate(dir);
+    if (board.piece && board.piece.orient !== o) Sound.sfx.rotate();
+  }
+  function pHard() { if (board) board.hardDrop(); } // 'lock' event makes the drop sound
+  function pSoft(on) { if (board) board.setSoftDrop(on); }
+
   // ---- Keyboard input (player board) ----
   const keyHeld = {};
   window.addEventListener("keydown", function (e) {
@@ -1070,12 +1202,12 @@
     if (paused) return;
     let handled = true;
     switch (e.key) {
-      case "ArrowLeft": board.move(-1); break;
-      case "ArrowRight": board.move(1); break;
-      case "ArrowUp": case "x": case "X": board.rotate(1); break;
-      case "z": case "Z": board.rotate(-1); break;
-      case "ArrowDown": board.setSoftDrop(true); keyHeld.down = true; break;
-      case " ": if (!keyHeld.space) { board.hardDrop(); keyHeld.space = true; } break;
+      case "ArrowLeft": pMove(-1); break;
+      case "ArrowRight": pMove(1); break;
+      case "ArrowUp": case "x": case "X": pRotate(1); break;
+      case "z": case "Z": pRotate(-1); break;
+      case "ArrowDown": pSoft(true); keyHeld.down = true; break;
+      case " ": if (!keyHeld.space) { pHard(); keyHeld.space = true; } break;
       default: handled = false;
     }
     if (handled) e.preventDefault();
@@ -1100,12 +1232,12 @@
     function press(act) {
       if (!board || screen !== SCREEN.PLAYING || paused || board.gameOver) return;
       switch (act) {
-        case "left": board.move(-1); startRepeat(act, function () { board.move(-1); }); break;
-        case "right": board.move(1); startRepeat(act, function () { board.move(1); }); break;
-        case "soft": board.setSoftDrop(true); break;
-        case "rotL": board.rotate(-1); break;
-        case "rotR": board.rotate(1); break;
-        case "hard": board.hardDrop(); break;
+        case "left": pMove(-1); startRepeat(act, function () { pMove(-1); }); break;
+        case "right": pMove(1); startRepeat(act, function () { pMove(1); }); break;
+        case "soft": pSoft(true); break;
+        case "rotL": pRotate(-1); break;
+        case "rotR": pRotate(1); break;
+        case "hard": pHard(); break;
         case "pause": setPaused(true); break;
       }
     }
@@ -1274,6 +1406,21 @@
       chipY += 22;
     }
 
+    // Chain-count popup.
+    if (b.chainPopup) {
+      const a = Math.min(1, b.chainPopup.t / 250);          // fade out at the end
+      const popIn = Math.min(1, (1000 - b.chainPopup.t) / 120);
+      const sz = Math.round(24 + 6 * popIn);
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textAlign = "center";
+      ctx.font = "700 " + sz + "px system-ui, sans-serif";
+      ctx.shadowColor = "rgba(95,208,200,0.85)"; ctx.shadowBlur = 12;
+      ctx.fillStyle = "#eafcff";
+      ctx.fillText(b.chainPopup.text, fx + FIELD_W / 2, fy + FIELD_H * 0.32);
+      ctx.restore();
+    }
+
     // Effect-name telop banner.
     if (b.telop) {
       const tin = Math.min(1, (TELOP_MS - b.telop.t) / 160);
@@ -1350,6 +1497,10 @@
   }
 
   // ---- Boot ----
+  let savedMute = false;
+  try { savedMute = localStorage.getItem("zd_muted") === "1"; } catch (_) {}
+  Sound.setMuted(savedMute);
+  refreshMute();
   bindTouchControls();
   resize();
   showScreen(SCREEN.TITLE);
