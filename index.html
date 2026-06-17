@@ -270,7 +270,7 @@
     </div>
   </div>
 
-  <div class="footer-note">Phase 2 — vs CPU</div>
+  <div class="footer-note">Phase 3 — disruptions</div>
 </div>
 
 <script>
@@ -313,6 +313,20 @@
   // ---- Garbage tuning --------------------------------------------------
   const GARBAGE_RATE = 70;   // score per 1 garbage block (large = fewer)
   const MAX_GARBAGE_DROP = 30; // cap garbage dropped per turn (5 rows)
+
+  // ---- Disruption / debuffs (Phase 3) ----------------------------------
+  const GAUGE_MAX = 500;        // gauge needed to auto-fire a debuff (large = rarer)
+  const SPEED_FACTOR = 0.42;    // fall-interval multiplier under スピードアップ
+  const TELOP_MS = 1600;        // effect-name telop duration
+  const WARN_MS = 950;          // warning flash duration
+  const SHUFFLE_FAKE_MS = 130;  // how often the fake NEXT changes under シャッフル
+  const DEBUFFS = [
+    { key: "flip",     name: "アンチグラビティ", ms: 8000 },
+    { key: "mirror",   name: "左右反転",         ms: 8000 },
+    { key: "blackout", name: "ブラックアウト",   ms: 5000 },
+    { key: "speed",    name: "スピードアップ",   ms: 6000 },
+    { key: "shuffle",  name: "シャッフル",       ms: 8000 },
+  ];
 
   // ---- Geometry helpers ------------------------------------------------
   function childOffset(orient) {
@@ -435,7 +449,8 @@
   // =====================================================================
   class Board {
     constructor() {
-      this.onSend = null; // function(n): route garbage to the opponent
+      this.onSend = null;   // function(n): route garbage to the opponent
+      this.onDebuff = null; // function(): the gauge filled -> hit the opponent
       this.reset();
     }
 
@@ -450,6 +465,12 @@
       this.chainScore = 0;        // score accumulated during current resolution
       this.pendingGarbage = 0;    // ojama waiting to drop on this board
       this.garbageCarry = 0;      // fractional garbage carried between attacks
+      this.gauge = 0;             // disruption gauge (fills from chains)
+      this.debuffs = { flip: 0, mirror: 0, blackout: 0, speed: 0, shuffle: 0 }; // remaining ms
+      this.telop = null;          // { text, t } effect-name banner
+      this.warnT = 0;             // warning-flash timer
+      this.fakeNext = this.makePair(); // bogus NEXT shown under シャッフル
+      this.fakeTimer = 0;
       this.particles = [];
       this.clearing = [];
       this.phase = "control";
@@ -500,6 +521,7 @@
     // ---- Player / CPU actions ----
     move(dir) {
       if (this.phase !== "control" || !this.piece) return;
+      if (this.debuffs.mirror > 0) dir = -dir; // 左右反転
       const p = this.piece;
       if (this.fits(p.row, p.col + dir, p.orient)) p.col += dir;
     }
@@ -583,6 +605,13 @@
         sent -= off;
       }
       if (sent > 0 && this.onSend) this.onSend(sent);
+
+      // Disruption gauge fills from the chain (bigger chain = faster).
+      this.gauge += this.chainScore;
+      if (this.gauge >= GAUGE_MAX) {
+        this.gauge = 0;
+        if (this.onDebuff) this.onDebuff();
+      }
       this.chain = 0;
 
       if (this.pendingGarbage > 0) {
@@ -624,6 +653,26 @@
     }
 
     addPendingGarbage(n) { this.pendingGarbage += n; }
+
+    // A debuff lands on this board: start its timer + show warning/telop.
+    applyDebuff(def) {
+      this.debuffs[def.key] = def.ms;
+      this.telop = { text: def.name, t: TELOP_MS };
+      this.warnT = WARN_MS;
+      if (def.key === "shuffle") this.fakeTimer = 0;
+    }
+
+    updateDebuffs(dt) {
+      for (const k in this.debuffs) {
+        if (this.debuffs[k] > 0) this.debuffs[k] = Math.max(0, this.debuffs[k] - dt);
+      }
+      if (this.telop) { this.telop.t -= dt; if (this.telop.t <= 0) this.telop = null; }
+      if (this.warnT > 0) this.warnT = Math.max(0, this.warnT - dt);
+      if (this.debuffs.shuffle > 0) {
+        this.fakeTimer -= dt;
+        if (this.fakeTimer <= 0) { this.fakeNext = this.makePair(); this.fakeTimer = SHUFFLE_FAKE_MS; }
+      }
+    }
 
     dropRowOf(c) {
       for (let r = ROWS - 1; r >= 0; r--) if (this.grid[r][c] === EMPTY) return r;
@@ -669,9 +718,11 @@
 
     update(dt) {
       this.updateParticles(dt);
+      this.updateDebuffs(dt);
 
       if (this.phase === "control" && this.piece) {
-        const interval = this.softDrop ? SOFT_DROP_MS : GRAVITY_MS;
+        let interval = this.softDrop ? SOFT_DROP_MS : GRAVITY_MS;
+        if (this.debuffs.speed > 0) interval *= SPEED_FACTOR; // スピードアップ
         this.fallTimer += dt;
         while (this.fallTimer >= interval) {
           this.fallTimer -= interval;
@@ -770,6 +821,16 @@
     return best;
   }
 
+  // A purely random legal placement (used when the CPU is "confused").
+  function randomMove(board) {
+    for (let t = 0; t < 24; t++) {
+      const orient = Math.floor(Math.random() * 4);
+      const col = Math.floor(Math.random() * COLS);
+      if (placePair(board.grid, col, orient, board.piece.a, board.piece.b)) return { col: col, orient: orient };
+    }
+    return chooseMove(board, "EASY");
+  }
+
   function makeCpu(board, diff) {
     const sp = CPU_SPEED[diff] || CPU_SPEED.NORMAL;
     let decidedFor = null, target = null, thinkT = 0, stepT = 0;
@@ -778,9 +839,15 @@
         if (board.gameOver) return;
         if (board.phase !== "control" || !board.piece) { thinkT = 0; return; }
         if (board.piece !== decidedFor) { decidedFor = board.piece; target = null; thinkT = 0; stepT = 0; }
+        // Visual debuffs can't fool the AI's grid reading, so simulate
+        // confusion instead: slower thinking + a chance of a random drop.
+        const confused = board.debuffs.flip > 0 || board.debuffs.blackout > 0 || board.debuffs.shuffle > 0;
         if (!target) {
           thinkT += dt;
-          if (thinkT >= sp.think) { target = chooseMove(board, diff); stepT = 0; }
+          if (thinkT >= sp.think * (confused ? 1.8 : 1)) {
+            target = (confused && Math.random() < 0.4) ? randomMove(board) : chooseMove(board, diff);
+            stepT = 0;
+          }
           return;
         }
         stepT += dt;
@@ -799,9 +866,11 @@
   // =====================================================================
   // Renderer — pure drawing from Board state.
   // =====================================================================
+  const HIDDEN_COLOR = { core: "#2b333e", edge: "#1a2027", glow: "#3a4350" };
+
   function drawCrystal(ctx, x, y, size, colorId, opts) {
     opts = opts || {};
-    const col = COLORS[colorId] || COLORS[1];
+    const col = opts.hidden ? HIDDEN_COLOR : (COLORS[colorId] || COLORS[1]);
     const cx = x + size / 2, cy = y + size / 2;
     const r = size * 0.40;
     const alpha = opts.alpha == null ? 1 : opts.alpha;
@@ -877,7 +946,7 @@
   // Two-board layout (player on the left, CPU on the right).
   const PAD = 14;
   const GAP = 26;
-  const HEADER_H = 66;
+  const HEADER_H = 80;
   const FIELD_W = COLS * CELL;
   const FIELD_H = VISIBLE_ROWS * CELL;
   const BASE_W = PAD * 2 + FIELD_W * 2 + GAP;
@@ -966,6 +1035,9 @@
     cpuBoard = new Board();
     board.onSend = function (n) { cpuBoard.addPendingGarbage(n); };
     cpuBoard.onSend = function (n) { board.addPendingGarbage(n); };
+    var pick = function () { return DEBUFFS[Math.floor(Math.random() * DEBUFFS.length)]; };
+    board.onDebuff = function () { cpuBoard.applyDebuff(pick()); };
+    cpuBoard.onDebuff = function () { board.applyDebuff(pick()); };
     cpuCtrl = makeCpu(cpuBoard, difficulty);
     matchEnded = false;
     showScreen(SCREEN.PLAYING);
@@ -1080,20 +1152,34 @@
 
     ctx.textAlign = "left";
     ctx.fillStyle = "#cfe9e4"; ctx.font = "700 15px system-ui, sans-serif";
-    ctx.fillText(label, ox + 12, oy + 20);
+    ctx.fillText(label, ox + 12, oy + 19);
     ctx.fillStyle = "#e8eef6"; ctx.font = "700 20px system-ui, sans-serif";
-    ctx.fillText(String(b.score), ox + 12, oy + 44);
+    ctx.fillText(String(b.score), ox + 12, oy + 42);
     if (b.pendingGarbage > 0) {
       ctx.fillStyle = "#ffb86b"; ctx.font = "600 12px system-ui, sans-serif";
-      ctx.fillText("おじゃま +" + b.pendingGarbage, ox + 12, oy + 60);
+      ctx.fillText("おじゃま +" + b.pendingGarbage, ox + 12, oy + 58);
     }
 
+    // NEXT (faked while under シャッフル)
+    const nx = (b.debuffs.shuffle > 0) ? b.fakeNext : b.next;
     ctx.textAlign = "right";
     ctx.fillStyle = "#8a97a8"; ctx.font = "10px system-ui, sans-serif";
     ctx.fillText("NEXT", ox + FIELD_W - 12, oy + 14);
     const ms = 18, mx = ox + FIELD_W - 12 - ms, my = oy + 18;
-    drawCrystal(ctx, mx, my, ms, b.next.b, {});
-    drawCrystal(ctx, mx, my + ms, ms, b.next.a, {});
+    drawCrystal(ctx, mx, my, ms, nx.b, {});
+    drawCrystal(ctx, mx, my + ms, ms, nx.a, {});
+
+    // Disruption gauge
+    const gx = ox + 12, gw = FIELD_W - 24, gy = oy + HEADER_H - 16, gh = 7;
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    roundRect(ctx, gx, gy, gw, gh, 3.5); ctx.fill();
+    const gf = Math.max(0, Math.min(1, b.gauge / GAUGE_MAX));
+    if (gf > 0) {
+      const grad = ctx.createLinearGradient(gx, 0, gx + gw, 0);
+      grad.addColorStop(0, "#3aa9a0"); grad.addColorStop(1, "#7fe0d6");
+      ctx.fillStyle = grad;
+      roundRect(ctx, gx, gy, Math.max(gh, gw * gf), gh, 3.5); ctx.fill();
+    }
     ctx.restore();
 
     // ---- Field ----
@@ -1106,6 +1192,12 @@
 
     ctx.save();
     roundRect(ctx, fx, fy, FIELD_W, FIELD_H, 6); ctx.clip();
+
+    // アンチグラビティ: flip the field contents vertically.
+    if (b.debuffs.flip > 0) {
+      const cyf = fy + FIELD_H / 2;
+      ctx.translate(0, cyf); ctx.scale(1, -1); ctx.translate(0, -cyf);
+    }
 
     ctx.strokeStyle = "rgba(255,255,255,0.035)"; ctx.lineWidth = 1;
     for (let c = 1; c < COLS; c++) {
@@ -1132,10 +1224,11 @@
       const p = b.piece;
       const o = childOffset(p.orient);
       const interp = p.offsetY;
+      const hidden = b.debuffs.blackout > 0; // ブラックアウト
       const py = (p.row - HIDDEN_ROWS + interp) * CELL;
-      drawPieceCell(fx, fy, p.col, py, p.a);
+      drawPieceCell(fx, fy, p.col, py, p.a, hidden);
       const cy = (p.row + o.dr - HIDDEN_ROWS + interp) * CELL;
-      drawPieceCell(fx, fy, p.col + o.dc, cy, p.b);
+      drawPieceCell(fx, fy, p.col + o.dc, cy, p.b, hidden);
     }
 
     for (const pt of b.particles) {
@@ -1147,7 +1240,57 @@
       ctx.fillRect(-pt.size / 2, -pt.size / 2, pt.size, pt.size);
       ctx.restore();
     }
-    ctx.restore(); // end clip
+    ctx.restore(); // end clip (and flip)
+
+    // ---- Overlays drawn upright over the field ----
+    // Warning flash on a fresh debuff.
+    if (b.warnT > 0) {
+      const w = b.warnT / WARN_MS;
+      const pulse = Math.abs(Math.sin((1 - w) * Math.PI * 5));
+      ctx.save();
+      ctx.globalAlpha = 0.55 * w;
+      ctx.strokeStyle = "#ff5a7a"; ctx.lineWidth = 6;
+      roundRect(ctx, fx + 3, fy + 3, FIELD_W - 6, FIELD_H - 6, 6); ctx.stroke();
+      ctx.globalAlpha = 0.16 * w * pulse;
+      ctx.fillStyle = "#ff3a5a";
+      roundRect(ctx, fx, fy, FIELD_W, FIELD_H, 6); ctx.fill();
+      ctx.restore();
+    }
+
+    // Active-debuff chips (top of the field).
+    let chipY = fy + 8;
+    ctx.textAlign = "left";
+    for (const def of DEBUFFS) {
+      const msLeft = b.debuffs[def.key];
+      if (msLeft <= 0) continue;
+      const txt = def.name + " " + Math.ceil(msLeft / 1000);
+      ctx.font = "600 11px system-ui, sans-serif";
+      const tw = ctx.measureText(txt).width + 14;
+      ctx.fillStyle = "rgba(24,10,20,0.72)";
+      roundRect(ctx, fx + 8, chipY, tw, 18, 9); ctx.fill();
+      ctx.fillStyle = "#ffb0d8";
+      ctx.fillText(txt, fx + 15, chipY + 13);
+      chipY += 22;
+    }
+
+    // Effect-name telop banner.
+    if (b.telop) {
+      const tin = Math.min(1, (TELOP_MS - b.telop.t) / 160);
+      const tout = Math.min(1, b.telop.t / 240);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(tin, tout));
+      const bw = FIELD_W - 16, bh = 48, bxx = fx + 8, byy = fy + FIELD_H / 2 - 24;
+      ctx.fillStyle = "rgba(8,10,16,0.82)";
+      roundRect(ctx, bxx, byy, bw, bh, 10); ctx.fill();
+      ctx.strokeStyle = "rgba(245,138,214,0.85)"; ctx.lineWidth = 2;
+      roundRect(ctx, bxx, byy, bw, bh, 10); ctx.stroke();
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#9aa4b2"; ctx.font = "10px system-ui, sans-serif";
+      ctx.fillText("妨害発動", fx + FIELD_W / 2, byy + 16);
+      ctx.fillStyle = "#ffd7e6"; ctx.font = "700 19px system-ui, sans-serif";
+      ctx.fillText(b.telop.text, fx + FIELD_W / 2, byy + 37);
+      ctx.restore();
+    }
 
     if (b.gameOver) {
       ctx.fillStyle = "rgba(8,12,18,0.6)";
@@ -1159,9 +1302,9 @@
     ctx.restore();
   }
 
-  function drawPieceCell(ox, oy, col, yWithinField, colorId) {
+  function drawPieceCell(ox, oy, col, yWithinField, colorId, hidden) {
     if (yWithinField + CELL <= 0) return;
-    drawCrystal(ctx, ox + col * CELL, oy + yWithinField, CELL, colorId, {});
+    drawCrystal(ctx, ox + col * CELL, oy + yWithinField, CELL, colorId, { hidden: hidden });
   }
 
   function roundRect(ctx, x, y, w, h, r) {
