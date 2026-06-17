@@ -782,12 +782,12 @@
   const WEIGHTS = {
     EASY:   { clear: 1.0, chain: 0.0,  adj: 0.2, hsum: 0.05, hmax: 0.2, rand: 6,   randomPick: 0.5 },
     NORMAL: { clear: 2.0, chain: 2.0,  adj: 0.6, hsum: 0.15, hmax: 0.6, rand: 4,   randomPick: 0.25 },
-    HARD:   { clear: 2.5, chain: 14.0, adj: 1.8, hsum: 0.25, hmax: 1.0, rand: 0.5, randomPick: 0.0 },
+    HARD:   { clear: 2.5, chain: 9.0,  adj: 1.3, hsum: 0.25, hmax: 1.0, rand: 1.5, randomPick: 0.06 },
   };
   const CPU_SPEED = {
     EASY:   { think: 450, step: 300 },
     NORMAL: { think: 330, step: 220 },
-    HARD:   { think: 110, step: 75 },
+    HARD:   { think: 200, step: 135 },
   };
 
   function evalGrid(g) {
@@ -958,7 +958,7 @@
   // clean). Soft, gentle tones per the "静かで集中できる" brief.
   // =====================================================================
   const Sound = (function () {
-    let ctx = null, master = null, muted = false, ambientOn = false;
+    let ctx = null, master = null, muted = false;
 
     function init() {
       if (ctx) return;
@@ -1012,21 +1012,9 @@
       lose: function () { if (!ctx) return; const t = ctx.currentTime; [4,2,1,0].forEach(function (k,i){ tone(PENTA[k]/2, t + i*0.14, 0.45, "sine", 0.12); }); },
     };
 
-    // Very soft drone pad (two low sines through a lowpass, slow detune).
-    function startAmbient() {
-      if (!ctx || ambientOn) return;
-      ambientOn = true;
-      const g = ctx.createGain(); g.gain.value = 0.05; g.connect(master);
-      const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 600; lp.connect(g);
-      [130.81, 196.00].forEach(function (f) {
-        const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = f;
-        const og = ctx.createGain(); og.gain.value = 0.5; o.connect(og); og.connect(lp); o.start();
-        const lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
-        const lg = ctx.createGain(); lg.gain.value = 2.5; lfo.connect(lg); lg.connect(o.detune); lfo.start();
-      });
-    }
+    // Very soft drone pad removed (it read as a distracting background hum).
 
-    return { init: init, resume: resume, setMuted: setMuted, isMuted: isMuted, sfx: sfx, startAmbient: startAmbient };
+    return { init: init, resume: resume, setMuted: setMuted, isMuted: isMuted, sfx: sfx };
   })();
 
   // =====================================================================
@@ -1134,7 +1122,7 @@
 
   function startGame(diff) {
     difficulty = diff || difficulty || "NORMAL";
-    Sound.init(); Sound.resume(); Sound.startAmbient();
+    Sound.init(); Sound.resume();
     board = new Board();
     cpuBoard = new Board();
     board.onSend = function (n) { cpuBoard.addPendingGarbage(n); };
