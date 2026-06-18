@@ -684,8 +684,28 @@
     }
 
     // Items consumed the moment they land (shatter / gravity drop).
-    // Filled in by their respective Phase-5 steps; harmless no-op until then.
-    activateLandItems() {}
+    activateLandItems() {
+      let acted = false;
+      // シャター: blow away the surrounding (2R+1)^2 block, colour-agnostic,
+      // then the item is spent. Creates a forced chain starter (救済).
+      const R = ITEM_CONFIG.shatterRadius;
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (this.items[r][c] !== ITEM.SHATTER) continue;
+          for (let dr = -R; dr <= R; dr++) {
+            for (let dc = -R; dc <= R; dc++) {
+              const nr = r + dr, nc = c + dc;
+              if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+              if (this.grid[nr][nc] !== EMPTY) this.spawnShatter(nc, nr, this.grid[nr][nc]);
+              this.grid[nr][nc] = EMPTY;
+              this.items[nr][nc] = ITEM.NONE;
+            }
+          }
+          acted = true;
+        }
+      }
+      if (acted) this.applyGravity();
+    }
 
     countBoardItems() {
       let n = 0;
