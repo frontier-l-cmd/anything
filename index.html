@@ -333,6 +333,40 @@
     { key: "shuffle",  name: "シャッフル",       ms: 11000 },
   ];
 
+  // ---- Items (Phase 5) -------------------------------------------------
+  // Cells keep their numeric colour in `grid`; a parallel `items` array
+  // carries the item type so existing colour logic stays untouched.
+  const ITEM = { NONE: 0, RAINBOW: 1, BOMB: 2, CHARGE: 3, SHATTER: 4, GRAVITY: 5 };
+  const ITEM_NAME = {
+    1: "レインボークリスタル", 2: "ボムクリスタル", 3: "チャージコア",
+    4: "シャター", 5: "グラビティドロップ",
+  };
+  // All item tuning lives here so feel can be adjusted in one place.
+  const ITEM_CONFIG = {
+    enabled: false,        // spawn system is switched on in the final step
+    chain2Rate: 0.15,      // P(next piece gets an item) after a 2+ chain
+    chain4Rate: 0.30,      // ... after a 4+ chain
+    maxOnBoard: 2,         // guard: persistent items (rainbow/bomb/charge) on a board
+    weights: [             // even by default; retune per item later
+      { type: ITEM.RAINBOW, w: 1 },
+      { type: ITEM.BOMB,    w: 1 },
+      { type: ITEM.CHARGE,  w: 1 },
+      { type: ITEM.SHATTER, w: 1 },
+      { type: ITEM.GRAVITY, w: 1 },
+    ],
+    shatterRadius: 1,      // 3x3 clear = radius 1
+    chargeGaugeBonus: 300, // gauge added when a group containing チャージコア clears
+  };
+  // Items that persist on the board (vs. ones consumed the instant they land).
+  function isPersistentItem(t) { return t === ITEM.RAINBOW || t === ITEM.BOMB || t === ITEM.CHARGE; }
+  function pickWeightedItem() {
+    let total = 0;
+    for (const e of ITEM_CONFIG.weights) total += e.w;
+    let r = Math.random() * total;
+    for (const e of ITEM_CONFIG.weights) { if ((r -= e.w) < 0) return e.type; }
+    return ITEM.RAINBOW;
+  }
+
   // ---- Geometry helpers ------------------------------------------------
   function childOffset(orient) {
     switch (orient & 3) {
@@ -462,7 +496,12 @@
 
     reset() {
       this.grid = [];
-      for (let r = 0; r < ROWS; r++) this.grid.push(new Array(COLS).fill(EMPTY));
+      this.items = []; // parallel item-type grid (ITEM.NONE where absent)
+      for (let r = 0; r < ROWS; r++) {
+        this.grid.push(new Array(COLS).fill(EMPTY));
+        this.items.push(new Array(COLS).fill(ITEM.NONE));
+      }
+      this.nextItemPending = ITEM.NONE; // item armed for the upcoming preview
       this.piece = null;
       this.next = this.makePair();
       this.score = 0;
@@ -478,6 +517,7 @@
       this.fakeNext = this.makePair(); // bogus NEXT shown under シャッフル
       this.fakeTimer = 0;
       this.chainPopup = null;     // { text, t } "N 連鎖!" popup
+      this.chargeBonusThisChain = 0; // gauge bonus from チャージコア this resolution
       this.particles = [];
       this.clearing = [];
       this.phase = "control";
@@ -489,14 +529,22 @@
       this.spawnPiece();
     }
 
-    makePair() { return { a: randColor(), b: randColor() }; }
+    makePair() { return { a: randColor(), b: randColor(), aItem: ITEM.NONE, bItem: ITEM.NONE }; }
 
     spawnPiece() {
       const pair = this.next;
       this.next = this.makePair();
+      // An item armed by the last chain rides in on the new preview piece.
+      if (this.nextItemPending) {
+        if (Math.random() < 0.5) this.next.aItem = this.nextItemPending;
+        else this.next.bItem = this.nextItemPending;
+        this.nextItemPending = ITEM.NONE;
+      }
       this.piece = {
         row: HIDDEN_ROWS - 1, col: SPAWN_COL, orient: 0,
-        a: pair.a, b: pair.b, offsetY: 0,
+        a: pair.a, b: pair.b,
+        aItem: pair.aItem || ITEM.NONE, bItem: pair.bItem || ITEM.NONE,
+        offsetY: 0,
       };
       const childRow = this.piece.row + childOffset(0).dr;
       if (!this.isFree(this.piece.row, this.piece.col) || !this.isFree(childRow, this.piece.col)) {
@@ -567,16 +615,58 @@
       const p = this.piece;
       const cells = this.cellsOf(p.row, p.col, p.orient);
       this.grid[cells[0].row][cells[0].col] = p.a;
-      if (cells[1].row >= 0 && cells[1].row < ROWS) this.grid[cells[1].row][cells[1].col] = p.b;
+      this.items[cells[0].row][cells[0].col] = p.aItem;
+      if (cells[1].row >= 0 && cells[1].row < ROWS) {
+        this.grid[cells[1].row][cells[1].col] = p.b;
+        this.items[cells[1].row][cells[1].col] = p.bItem;
+      }
       this.piece = null;
-      this.chainScore = 0; // start of a fresh resolution
+      this.chainScore = 0;        // start of a fresh resolution
+      this.chargeBonusThisChain = 0;
       this.emit("lock");
       this.applyGravity();
+      this.activateLandItems(); // shatter / gravity items trigger on contact
       this.beginResolve();
     }
 
-    applyGravity() { gridApplyGravity(this.grid); }
+    // Gravity must move colour and item in lockstep.
+    applyGravity() {
+      for (let c = 0; c < COLS; c++) {
+        let write = ROWS - 1;
+        for (let r = ROWS - 1; r >= 0; r--) {
+          if (this.grid[r][c] !== EMPTY) {
+            const v = this.grid[r][c], it = this.items[r][c];
+            this.grid[r][c] = EMPTY; this.items[r][c] = ITEM.NONE;
+            this.grid[write][c] = v; this.items[write][c] = it;
+            write--;
+          }
+        }
+      }
+    }
     findGroups() { return gridFindGroups(this.grid); }
+
+    // Items consumed the moment they land (shatter / gravity drop).
+    // Filled in by their respective Phase-5 steps; harmless no-op until then.
+    activateLandItems() {}
+
+    countBoardItems() {
+      let n = 0;
+      for (let r = 0; r < ROWS; r++)
+        for (let c = 0; c < COLS; c++)
+          if (isPersistentItem(this.items[r][c])) n++;
+      return n;
+    }
+
+    // After a chain, maybe arm an item for the next piece (chain-reward).
+    maybeArmItem(chain) {
+      if (!ITEM_CONFIG.enabled || this.nextItemPending) return;
+      let rate = 0;
+      if (chain >= 4) rate = ITEM_CONFIG.chain4Rate;
+      else if (chain >= 2) rate = ITEM_CONFIG.chain2Rate;
+      if (rate <= 0) return;
+      if (this.countBoardItems() >= ITEM_CONFIG.maxOnBoard) return;
+      if (Math.random() < rate) this.nextItemPending = pickWeightedItem();
+    }
 
     beginResolve() {
       const groups = this.findGroups();
@@ -617,13 +707,17 @@
       }
       if (sent > 0 && this.onSend) this.onSend(sent);
 
-      // Disruption gauge fills from the chain (bigger chain = faster).
-      this.gauge += this.chainScore;
+      // Disruption gauge fills from the chain (bigger chain = faster),
+      // plus any チャージコア bonus accumulated while clearing.
+      this.gauge += this.chainScore + this.chargeBonusThisChain;
+      this.chargeBonusThisChain = 0;
       if (this.gauge >= GAUGE_MAX) {
         this.gauge = 0;
         if (this.onDebuff) this.onDebuff();
       }
+      const reachedChain = this.chain;
       this.chain = 0;
+      this.maybeArmItem(reachedChain); // chain-reward item for the next piece
 
       if (this.pendingGarbage > 0) {
         this.phase = "garbage";
@@ -651,11 +745,13 @@
         const v = this.grid[cell.row][cell.col];
         this.spawnShatter(cell.col, cell.row, v);
         this.grid[cell.row][cell.col] = EMPTY;
+        this.items[cell.row][cell.col] = ITEM.NONE;
       }
       for (const key of ojamaOut) {
         const r = Math.floor(key / COLS), c = key % COLS;
         this.spawnShatter(c, r, OJAMA);
         this.grid[r][c] = EMPTY;
+        this.items[r][c] = ITEM.NONE;
       }
       this.clearing = [];
       this.applyGravity();
@@ -708,7 +804,7 @@
       for (let c = 0; c < COLS; c++) {
         let add = per + (extra.has(c) ? 1 : 0);
         let dr = this.dropRowOf(c);
-        while (add > 0 && dr >= 0) { this.grid[dr][c] = OJAMA; dr--; add--; }
+        while (add > 0 && dr >= 0) { this.grid[dr][c] = OJAMA; this.items[dr][c] = ITEM.NONE; dr--; add--; }
       }
       this.applyGravity();
       if (n > 0) this.emit("garbage", { n: n });
@@ -945,6 +1041,51 @@
     ctx.restore();
   }
 
+  // Distinguishing motif drawn on top of an item's base crystal.
+  function drawItemMark(ctx, cx, cy, r, item, alpha) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.globalAlpha = alpha == null ? 1 : alpha;
+    if (item === ITEM.RAINBOW) {
+      const hue = (animTime * 0.12) % 360;
+      ctx.lineWidth = Math.max(2, r * 0.18);
+      for (let i = 0; i < 6; i++) {
+        ctx.strokeStyle = "hsl(" + ((hue + i * 60) % 360) + ",90%,65%)";
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.62, i * Math.PI / 3, i * Math.PI / 3 + Math.PI / 3.4);
+        ctx.stroke();
+      }
+    } else if (item === ITEM.BOMB) {
+      const pr = r * 0.34 * (1 + 0.14 * Math.sin(animTime * 0.012));
+      ctx.fillStyle = "rgba(18,12,16,0.92)";
+      ctx.beginPath(); ctx.arc(0, 0, pr, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(255,186,120,0.95)";
+      ctx.beginPath(); ctx.arc(0, 0, pr * 0.42, 0, Math.PI * 2); ctx.fill();
+    } else if (item === ITEM.CHARGE) {
+      ctx.shadowColor = "#7fe0d6"; ctx.shadowBlur = 8;
+      ctx.strokeStyle = "#7fe0d6"; ctx.lineWidth = Math.max(2, r * 0.16);
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.16, -r * 0.46); ctx.lineTo(r * 0.06, -r * 0.06);
+      ctx.lineTo(-r * 0.1, -r * 0.02); ctx.lineTo(r * 0.16, r * 0.46);
+      ctx.stroke();
+    } else if (item === ITEM.SHATTER) {
+      ctx.strokeStyle = "rgba(255,255,255,0.95)"; ctx.lineWidth = Math.max(1.5, r * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.5, -r * 0.12); ctx.lineTo(0, r * 0.04); ctx.lineTo(r * 0.46, -r * 0.2);
+      ctx.moveTo(0, r * 0.04); ctx.lineTo(-r * 0.12, r * 0.5);
+      ctx.moveTo(0, r * 0.04); ctx.lineTo(r * 0.22, r * 0.46);
+      ctx.stroke();
+    } else if (item === ITEM.GRAVITY) {
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.beginPath();
+      ctx.moveTo(0, r * 0.52); ctx.lineTo(-r * 0.34, r * 0.02); ctx.lineTo(-r * 0.13, r * 0.02);
+      ctx.lineTo(-r * 0.13, -r * 0.46); ctx.lineTo(r * 0.13, -r * 0.46); ctx.lineTo(r * 0.13, r * 0.02);
+      ctx.lineTo(r * 0.34, r * 0.02); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  }
+
   function hexA(hex, a) {
     const h = hex.replace("#", "");
     const r = parseInt(h.substring(0, 2), 16);
@@ -1034,6 +1175,7 @@
 
   let dpr = 1;
   let viewScale = 1;
+  let animTime = 0; // ms clock for item animations (rainbow hue, bomb pulse...)
   const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
   const stageEl = document.getElementById("stage");
 
@@ -1288,7 +1430,9 @@
     ctx.fillText("NEXT", ox + FIELD_W - 12, oy + 14);
     const ms = 18, mx = ox + FIELD_W - 12 - ms, my = oy + 18;
     drawCrystal(ctx, mx, my, ms, nx.b, {});
+    if (nx.bItem) drawItemMark(ctx, mx + ms / 2, my + ms / 2, ms * 0.40, nx.bItem, 1);
     drawCrystal(ctx, mx, my + ms, ms, nx.a, {});
+    if (nx.aItem) drawItemMark(ctx, mx + ms / 2, my + ms + ms / 2, ms * 0.40, nx.aItem, 1);
 
     // Disruption gauge
     const gx = ox + 12, gw = FIELD_W - 24, gy = oy + HEADER_H - 16, gh = 7;
@@ -1338,6 +1482,7 @@
           alpha = f > 0.7 ? pulse * (1 - (f - 0.7) / 0.3) : pulse;
         }
         drawCrystal(ctx, x, y, CELL, v, { alpha: alpha });
+        if (b.items[r][c]) drawItemMark(ctx, x + CELL / 2, y + CELL / 2, CELL * 0.40, b.items[r][c], alpha);
       }
     }
 
@@ -1347,9 +1492,9 @@
       const interp = p.offsetY;
       const hidden = b.debuffs.blackout > 0; // ブラックアウト
       const py = (p.row - HIDDEN_ROWS + interp) * CELL;
-      drawPieceCell(fx, fy, p.col, py, p.a, hidden);
+      drawPieceCell(fx, fy, p.col, py, p.a, hidden, p.aItem);
       const cy = (p.row + o.dr - HIDDEN_ROWS + interp) * CELL;
-      drawPieceCell(fx, fy, p.col + o.dc, cy, p.b, hidden);
+      drawPieceCell(fx, fy, p.col + o.dc, cy, p.b, hidden, p.bItem);
     }
 
     for (const pt of b.particles) {
@@ -1438,9 +1583,12 @@
     ctx.restore();
   }
 
-  function drawPieceCell(ox, oy, col, yWithinField, colorId, hidden) {
+  function drawPieceCell(ox, oy, col, yWithinField, colorId, hidden, item) {
     if (yWithinField + CELL <= 0) return;
     drawCrystal(ctx, ox + col * CELL, oy + yWithinField, CELL, colorId, { hidden: hidden });
+    if (item && !hidden) {
+      drawItemMark(ctx, ox + col * CELL + CELL / 2, oy + yWithinField + CELL / 2, CELL * 0.40, item, 1);
+    }
   }
 
   function roundRect(ctx, x, y, w, h, r) {
@@ -1460,6 +1608,7 @@
     let dt = now - last;
     last = now;
     if (dt > 100) dt = 100;
+    animTime += dt;
 
     updateAmbient(dt);
 
