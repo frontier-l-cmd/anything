@@ -415,17 +415,34 @@
 
         /* Responsive Layout */
         @media (max-width: 900px) {
+            /* Mobile = play screen only: no page scroll, no side panels.
+               All stats/HOLD/NEXT are drawn into the canvas HUD instead, and
+               pause lives in the bottom controller. */
+            html, body {
+                height: 100%;
+                overflow: hidden;
+            }
+            body {
+                justify-content: flex-start;
+                padding: 6px 8px 0;
+            }
+            h1, .subtitle, .panel {
+                display: none;
+            }
             .game-container {
                 grid-template-columns: 1fr;
-                max-width: 400px;
+                max-width: 100%;
+                gap: 0;
             }
-
-            .panel {
-                order: 2;
-            }
-
             .board-wrapper {
                 order: 1;
+            }
+            #gameBoard {
+                /* Fit within the screen above the fixed controller (no scroll). */
+                max-width: 100%;
+                max-height: calc(100dvh - 196px);
+                width: auto;
+                height: auto;
             }
 
             /* Pin the controller to the bottom of the screen so it is always
@@ -437,22 +454,13 @@
                 bottom: 0;
                 transform: translateX(-50%);
                 width: 100%;
-                max-width: 400px;
+                max-width: 420px;
                 margin-top: 0;
                 padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
                 background: rgba(11, 12, 16, 0.94);
                 backdrop-filter: blur(8px);
                 border-top: 1px solid var(--border-color);
                 z-index: 50;
-            }
-
-            /* Reserve space so the fixed controller never hides the stats panel. */
-            body {
-                padding-bottom: 230px;
-            }
-
-            h1 {
-                font-size: 2rem;
             }
         }
     </style>
@@ -605,6 +613,7 @@
         <div class="control-btn" id="mDown">↓</div>
         <div class="control-btn" id="mRight">→</div>
         <div class="control-btn span-2" id="mReroll">🔀 引き直し</div>
+        <div class="control-btn" id="mPause">⏸ 停止</div>
     </div>
 
     <script>
@@ -770,6 +779,13 @@
         const hCtx = holdCanvas.getContext('2d');
         const nextCanvas = document.getElementById('nextCanvas');
         const nCtx = nextCanvas.getContext('2d');
+
+        // On phones we hide the side panels and draw a compact HUD on the canvas
+        // top instead (HOLD/NEXT/score/level/stage), so the play screen needs no
+        // scrolling. HUD_H is the canvas-space height reserved for that HUD.
+        let isMobile = window.matchMedia('(max-width: 900px)').matches;
+        const HUD_H = 108;
+        function hudTop() { return isMobile ? HUD_H : 0; }
 
         // Tetromino shapes mapping
         const SHAPES = {
@@ -1463,25 +1479,139 @@
             ctx.restore();
         }
 
-        const CPU_OX = 360, CPU_OY = 160, CPU_SCALE = 0.5;
+        const CPU_OX = 360, CPU_SCALE = 0.5;
+        const BOARD_W = COLS * BLOCK_SIZE, BOARD_H = ROWS * BLOCK_SIZE;
+
+        // A framed background behind a board so the player/CPU fields read as
+        // separate panels (fixes the "where's the boundary" confusion in VS).
+        function drawBoardPanel(ox, oy, scale) {
+            const w = BOARD_W * scale, h = BOARD_H * scale;
+            ctx.save();
+            ctx.fillStyle = 'rgba(10, 12, 18, 0.85)';
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(ox - 3, oy - 3, w + 6, h + 6, 10);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        function drawBoardLabel(text, x, y, color) {
+            ctx.save();
+            ctx.font = '800 14px Outfit, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            const w = ctx.measureText(text).width;
+            ctx.fillStyle = 'rgba(11, 12, 16, 0.78)';
+            ctx.beginPath();
+            ctx.roundRect(x - 4, y - 14, w + 8, 19, 6);
+            ctx.fill();
+            ctx.fillStyle = color;
+            ctx.fillText(text, x, y);
+            ctx.restore();
+        }
+
+        function drawVSDecor(top, cpuTop) {
+            // Dashed divider between the two fields.
+            const dividerX = BOARD_W + (CPU_OX - BOARD_W) / 2;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 8]);
+            ctx.beginPath();
+            ctx.moveTo(dividerX, top);
+            ctx.lineTo(dividerX, top + BOARD_H);
+            ctx.stroke();
+            ctx.restore();
+            drawBoardLabel('YOU', 6, top + 16, '#00F0F0');
+            drawBoardLabel('CPU  ' + vsStage + ' / 5', CPU_OX + 4, cpuTop + 14, '#FF3366');
+        }
+
+        // Mobile HUD: HOLD/NEXT minis + stats drawn across the canvas top.
+        function drawMiniBox(label, piece, x, y, box) {
+            ctx.save();
+            ctx.fillStyle = '#8f9cae';
+            ctx.font = '600 10px Outfit, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            ctx.fillText(label, x, y + 8);
+            const by = y + 12;
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(x, by, box, box, 6);
+            ctx.fill();
+            ctx.stroke();
+            if (piece) {
+                const m = piece.matrix;
+                const cell = Math.min((box - 10) / m[0].length, (box - 10) / m.length);
+                const w = m[0].length * cell, h = m.length * cell;
+                const ox = x + (box - w) / 2, oy = by + (box - h) / 2;
+                for (let r = 0; r < m.length; r++)
+                    for (let c = 0; c < m[r].length; c++)
+                        if (m[r][c]) drawNeonBlock(ctx, ox + c * cell, oy + r * cell, m[r][c], cell, true);
+            }
+            ctx.restore();
+        }
+
+        function drawHudStat(label, val, x, y) {
+            ctx.save();
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            ctx.fillStyle = '#8f9cae';
+            ctx.font = '600 10px Outfit, sans-serif';
+            ctx.fillText(label, x, y);
+            ctx.fillStyle = '#f5f6f7';
+            ctx.font = '800 16px Outfit, sans-serif';
+            ctx.fillText(val, x, y + 18);
+            ctx.restore();
+        }
+
+        function drawHUD() {
+            const b = playerBoard;
+            drawMiniBox('HOLD', b.holdPiece, 6, 8, 46);
+            drawMiniBox('NEXT', b.nextPiece, 60, 8, 46);
+            const c1 = 118, c2 = 210;
+            drawHudStat('SCORE', String(b.score).padStart(6, '0'), c1, 20);
+            drawHudStat('LEVEL', String(b.level), c2, 20);
+            drawHudStat('LINES', String(b.linesCleared), c1, 66);
+            drawHudStat('REROLL', String(b.rerollStock), c2, 66);
+            if (gameMode === 'vs') drawHudStat('STAGE', vsStage + ' / 5', 300, 20);
+        }
+
+        function drawPausedOverlay() {
+            ctx.save();
+            ctx.fillStyle = 'rgba(11, 12, 16, 0.62)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#f5f6f7';
+            ctx.font = '800 30px Outfit, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('PAUSED', canvas.width / 2, canvas.height / 2);
+            ctx.restore();
+        }
 
         function render() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (!playerBoard) return;
-            drawBoardInto(playerBoard, 0, 0, 1);
+            const top = hudTop();
+
+            drawBoardPanel(0, top, 1);
+            drawBoardInto(playerBoard, 0, top, 1);
 
             if (gameMode === 'vs' && cpuBoard) {
-                drawBoardInto(cpuBoard, CPU_OX, CPU_OY, CPU_SCALE);
-                // Labels
-                ctx.save();
-                ctx.fillStyle = '#8f9cae';
-                ctx.font = '700 14px Outfit, sans-serif';
-                ctx.textAlign = 'left';
-                ctx.fillText('YOU', 4, 18);
-                ctx.fillStyle = '#FF3366';
-                ctx.fillText('CPU  ' + vsStage + ' / 5', CPU_OX, CPU_OY - 10);
-                ctx.restore();
+                const cpuTop = top + (BOARD_H - BOARD_H * CPU_SCALE) / 2;
+                drawBoardPanel(CPU_OX, cpuTop, CPU_SCALE);
+                drawBoardInto(cpuBoard, CPU_OX, cpuTop, CPU_SCALE);
+                drawVSDecor(top, cpuTop);
             }
+
+            if (isMobile) drawHUD();
+            if (isPaused) drawPausedOverlay();
+
+            // Desktop side previews (hidden on mobile, harmless to keep updating).
             drawPreview(playerBoard.nextPiece, nextCanvas, nCtx);
             drawPreview(playerBoard.holdPiece, holdCanvas, hCtx);
         }
@@ -1545,14 +1675,19 @@
         }
 
         function resizeCanvas() {
-            if (gameMode === 'vs') {
-                canvas.width = CPU_OX + COLS * BLOCK_SIZE * CPU_SCALE; // 360 + 160 = 520
-                canvas.height = ROWS * BLOCK_SIZE;                     // 640
-            } else {
-                canvas.width = COLS * BLOCK_SIZE;   // 320
-                canvas.height = ROWS * BLOCK_SIZE;  // 640
-            }
+            isMobile = window.matchMedia('(max-width: 900px)').matches;
+            canvas.width = (gameMode === 'vs') ? (CPU_OX + COLS * BLOCK_SIZE * CPU_SCALE) : (COLS * BLOCK_SIZE);
+            canvas.height = ROWS * BLOCK_SIZE + hudTop();
         }
+
+        // Re-fit the canvas when the viewport crosses the mobile/desktop breakpoint
+        // or the device rotates.
+        window.addEventListener('resize', function () {
+            const was = isMobile;
+            isMobile = window.matchMedia('(max-width: 900px)').matches;
+            if (playerBoard) resizeCanvas();
+            if (was !== isMobile) { /* layout class swap handled by CSS */ }
+        });
 
         function setupResultButtons(opts) {
             nextStageBtn.style.display = opts.next ? '' : 'none';
@@ -1724,6 +1859,20 @@
         bindBtn('mHardDrop', () => playerBoard.hardDrop());
         bindBtn('mHold', () => playerBoard.hold());
         bindBtn('mReroll', () => playerBoard.reroll());
+
+        // Pause button on the mobile controller — must work whether or not paused,
+        // so it bypasses the canControl() gate used by the play buttons.
+        (function () {
+            const mp = document.getElementById('mPause');
+            const toggle = function () {
+                if (!isGameStarted || matchEnded) return;
+                isPaused = !isPaused;
+                pauseBtn.innerText = isPaused ? '再開' : '一時停止';
+                mp.innerText = isPaused ? '▶ 再開' : '⏸ 停止';
+            };
+            mp.addEventListener('touchstart', function (e) { e.preventDefault(); toggle(); });
+            mp.addEventListener('click', toggle);
+        })();
 
         // ---- Main loop ----
         function update(time = 0) {
